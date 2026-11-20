@@ -46,6 +46,9 @@
         #player-wrapper { border-radius: 0; box-shadow: none; }
     }
     video, iframe { width: 100%; height: 100%; border: none; outline: none; display: block; }
+    /* 埋め込みはプレーヤー枠の全面に広げる(以前は高さ不定の親に対して 100% が効かず、上半分だけになっていた) */
+    #iframe-container { position: absolute; inset: 0; width: 100%; height: 100%; z-index: 1; background: #000; }
+    #iframe-container iframe { position: absolute; inset: 0; width: 100%; height: 100%; }
 
     .loader-overlay {
         position: absolute; inset: 0;
@@ -711,20 +714,24 @@
                 <div class="cp-card">
                     <div class="cp-card-title">ストリーム取得 API</div>
                     <select class="cp-select" id="cpStreamApiSelect" onchange="applyStreamApiChange(this.value)">
-                        <option value="">自動選択</option>
-                        <option value="sia">Sia API</option>
-                        <option value="piped">Piped API</option>
-                        <option value="rapidapi">RapidAPI</option>
-                        <option value="zernio">Zernio API</option>
+                        <option value="">自動選択（並列で最速を採用）</option>
                         <option value="invidious">Invidious API</option>
+                        <option value="piped">Piped API</option>
+                        <option value="sia">Sia API</option>
                         <option value="sennin">Sennin API</option>
+                        <option value="acethinker">AceThinker API</option>
+                        <option value="min-tube2-api">MIN-Tube2 API</option>
+                        <option value="rapidapi">RapidAPI</option>
+                        <option value="freemake">Freemake API</option>
+                        <option value="zernio">Zernio (getlate)</option>
                     </select>
                 </div>
                 <div class="cp-card">
                     <div class="cp-card-title">情報取得 API</div>
                     <select class="cp-select" id="cpInfoApiSelect" onchange="applyInfoApiChange(this.value)">
-                        <option value="">自動選択</option>
+                        <option value="">自動選択（並列で最速を採用）</option>
                         <option value="invidious">Invidious API</option>
+                        <option value="piped">Piped API</option>
                         <option value="sia">Sia API</option>
                         <option value="sennin">Sennin API</option>
                     </select>
@@ -826,6 +833,7 @@
                     <div class="yt-api-badges">
                         <span class="yt-api-badge" id="api-info-badge">情報API: <span id="current-info-api-name">{{ info_api_used or '取得中' }}</span></span>
                         <span class="yt-api-badge" id="stream-info-badge">ストリームAPI: <span id="current-stream-api-name">{{ stream_api_used or '取得中' }}</span></span>
+                        {% if stream_api_note %}<span class="yt-api-badge" id="stream-api-note">{{ stream_api_note }}</span>{% endif %}
                     </div>
                 </div>
                 <div class="yt-description-body" id="description-body">{% if description %}{{ description | safe }}{% else %}<div class="skeleton-box skeleton-text" style="width: 90%;"></div><div class="skeleton-box skeleton-text" style="width: 60%;"></div>{% endif %}</div>
@@ -931,7 +939,13 @@
     const SERVER_HAS_INFO = {{ 'true' if video_title else 'false' }};
 
     const START_TIMEOUT_MS = 8000;
-    const STREAM_REFRESH_TIMEOUT_MS = 12000;
+    const STREAM_REFRESH_TIMEOUT_MS = 22000;
+    const STREAM_LOAD_TIMEOUT_MS = 22000;
+    // 画面で選んだストリームAPI(URLの stream_api)。自動選択のときは空
+    const STREAM_API_PARAM = new URLSearchParams(window.location.search).get('stream_api') || '';
+    // 既定は NoCookie。キーを v2 にして、以前の保存値(stream)に引きずられないようにする
+    const PREF_EMBED_KEY = 'pref_embed_mode_v2';
+    const DEFAULT_EMBED_MODE = 'nocookie';
     const COMMENTS_TIMEOUT_MS = 8000;
 
     // ---------- Small helpers ----------
@@ -943,9 +957,10 @@
             if (p && typeof p.catch === 'function') p.catch(() => {});
         } catch (e) {}
     }
-    async function fetchJson(url, timeoutMs) {
+    async function fetchJson(url, timeoutMs, externalSignal) {
         const ctl = new AbortController();
         const timer = setTimeout(() => ctl.abort(), timeoutMs);
+        if (externalSignal) externalSignal.addEventListener('abort', () => ctl.abort());
         try {
             const res = await fetch(url, { signal: ctl.signal, headers: { Accept: 'application/json' }, cache: 'no-store' });
             if (!res.ok) throw new Error('HTTP ' + res.status);
@@ -966,6 +981,66 @@
         }
         setTimeout(done, 6000);
     });
+
+    // /api/streams の URL。refresh=true のときは取り直し、直リンクが拒否される場合の中継URL(proxy=1)にする
+    function streamsApiUrl(refresh) {
+        const p = new URLSearchParams();
+        if (refresh) { p.set('refresh', '1'); p.set('proxy', '1'); }
+        if (STREAM_API_PARAM) p.set('api', STREAM_API_PARAM);
+        const qs = p.toString();
+        return `/api/streams/${encodeURIComponent(videoId)}${qs ? '?' + qs : ''}`;
+    }
+
+    // サーバー描画の待ち時間に間に合わなかった候補を、完了まで待って取得してから再生する
+    let streamLoading = null;
+    let streamAbort = null;   // 取得中の候補読み込みを中断するためのコントローラ
+    let streamGen = 0;        // 世代番号: 中断された古い読み込みの結果を無視する
+    let currentSourceMode = DEFAULT_EMBED_MODE;
+
+    // ストリーム側の処理をすべて止める(埋め込みなど他の再生方法に切り替えたとき)
+    function stopStreamPlayback() {
+        streamGen += 1;
+        if (streamAbort) { streamAbort.abort(); streamAbort = null; }
+        streamLoading = null;
+        stopMedia();                 // タイマー・HLS・video/audio の読み込みを停止(token も進む)
+        playback.list = [];
+        playback.index = -1;
+        playback.refreshed = false;
+        playback.broken = false;
+        setLoading(false);
+    }
+
+    function loadStreamCandidatesThenPlay() {
+        setLoading(true);
+        if (!streamLoading) {
+            const gen = ++streamGen;
+            streamAbort = new AbortController();
+            const signal = streamAbort.signal;
+            streamLoading = fetchJson(streamsApiUrl(false), STREAM_LOAD_TIMEOUT_MS, signal)
+                .then((data) => {
+                    if (data && orderCandidates(data.streamUrls, data.videoUrls).length) {
+                        setCandidates(data.streamUrls, data.videoUrls);
+                        if (data.stream_api_fallback) {
+                            showAlert(`指定の「${data.stream_api_fallback}」で取得できなかったため、自動選択に切り替えました`, 3000, true);
+                        }
+                        return true;
+                    }
+                    return false;
+                })
+                .catch((e) => { console.warn('[player] stream load failed', e); return false; })
+                .finally(() => { if (gen === streamGen) { streamLoading = null; streamAbort = null; } });
+            streamLoading.gen = gen;
+        }
+        const myGen = streamLoading.gen;
+        streamLoading.then((ok) => {
+            if (myGen !== streamGen || currentSourceMode !== 'stream') return; // 中断・埋め込みへ切替済み
+            if (!ok) { showPlayerError(); return; }
+            playback.list = playableCandidates.slice();
+            playback.broken = false;
+            playback.refreshed = false;
+            playCandidate(0, 0);
+        });
+    }
 
     // ---------- Candidate selection ----------
     const HLS_URL_RE = /\.m3u8|\/manifest\//i;
@@ -1052,6 +1127,7 @@
     }
 
     function playCandidate(index, resumeAt) {
+        if (currentSourceMode !== 'stream') return; // 埋め込み再生中は動かさない(埋め込みを消さないため)
         if (index >= playback.list.length) {
             handleAllFailed();
             return;
@@ -1096,6 +1172,7 @@
     }
 
     function failCandidate(token, reason) {
+        if (currentSourceMode !== 'stream') return;
         if (token !== playback.token) return;
         clearTimeout(playback.timer);
         playback.timer = null;
@@ -1110,6 +1187,7 @@
     }
 
     async function handleAllFailed() {
+        if (currentSourceMode !== 'stream') return;
         stopMedia();
         playback.broken = true;
         if (!playback.refreshed) {
@@ -1120,11 +1198,11 @@
             let data = null;
             try {
                 // refresh=1: キャッシュを捨てて取り直す / proxy=1: 直リンクが拒否されるため中継URLに変える
-                data = await fetchJson(`/api/streams/${encodeURIComponent(videoId)}?refresh=1&proxy=1`, STREAM_REFRESH_TIMEOUT_MS);
+                data = await fetchJson(streamsApiUrl(true), STREAM_REFRESH_TIMEOUT_MS);
             } catch (e) {
                 console.warn('[player] stream refresh failed', e);
             }
-            if (t0 !== playback.token) return; // the user acted in the meantime
+            if (t0 !== playback.token || currentSourceMode !== 'stream') return; // the user acted in the meantime
             if (data && orderCandidates(data.streamUrls, data.videoUrls).length) {
                 setCandidates(data.streamUrls, data.videoUrls);
                 playback.list = playableCandidates.slice();
@@ -1283,7 +1361,7 @@
         if (card) card.classList.add('selected');
         const radio = document.getElementById(`cp-src-${mode}`);
         if (radio) radio.checked = true;
-        if (options.persist !== false) lsSet('pref_embed_mode', mode);
+        if (options.persist !== false) lsSet(PREF_EMBED_KEY, mode);
         setExternalSource(mode, options);
     }
 
@@ -1294,9 +1372,15 @@
 
     function setExternalSource(mode, opts) {
         const silent = !!(opts && opts.silent);
+        currentSourceMode = mode;
         if (mode === 'stream') {
             hideIframe();
             hidePlayerError();
+            if (!playableCandidates.length) {
+                loadStreamCandidatesThenPlay();
+                if (!silent) showAlert('Stream 再生に切り替えました', 1500);
+                return;
+            }
             if (!playback.list.length) playback.list = playableCandidates.slice();
             if (playback.broken || playback.index < 0) {
                 playCandidate(0, 0);
@@ -1307,7 +1391,8 @@
             return;
         }
 
-        // Embed modes: pause our player, keep its source so switching back resumes.
+        // 埋め込みへ切り替え: ストリームの処理(取得・再生・タイマー・次候補への切替)をすべて終了する
+        stopStreamPlayback();
         video.pause();
         audio.pause();
         hidePlayerError();
@@ -1364,13 +1449,14 @@
     }
 
     function applyApiChange(param, value, label) {
-        if (!value) {
-            showAlert(`${label}を自動選択に設定しました`, 1500);
-            return;
-        }
         const url = new URL(window.location.href);
-        url.searchParams.set(param, value);
-        showAlert(`${label}を「${value.toUpperCase()}」に変更します...`, 1500);
+        if (value) {
+            url.searchParams.set(param, value);
+            showAlert(`${label}を「${value}」に変更します...`, 1500);
+        } else {
+            url.searchParams.delete(param); // 自動選択 = 指定を外す
+            showAlert(`${label}を自動選択に戻します...`, 1500);
+        }
         setTimeout(() => { window.location.href = url.toString(); }, 500);
     }
     function applyStreamApiChange(apiId) { applyApiChange('stream_api', apiId, 'ストリームAPI'); }
@@ -1651,16 +1737,20 @@
     function updateApiDisplay() {
         const infoApiMap = {
             'invidious': { name: 'Invidious', timeout: '4.0s' },
-            'sia': { name: 'Sia Tube', timeout: '3.0s' },
+            'piped': { name: 'Piped', timeout: '12.0s' },
+            'sia': { name: 'Sia Tube', timeout: '5.0s' },
             'sennin': { name: 'Sennin', timeout: '4.0s' }
         };
         const streamApiMap = {
-            'sia': { name: 'Sia Tube', timeout: '2.5s' },
-            'piped': { name: 'Piped', timeout: '2.5s' },
-            'rapidapi': { name: 'RapidAPI', timeout: '2.5s' },
-            'zernio': { name: 'Zernio', timeout: '3.0s' },
             'invidious': { name: 'Invidious', timeout: '4.0s' },
-            'sennin': { name: 'Sennin', timeout: '3.5s' }
+            'piped': { name: 'Piped', timeout: '10.0s' },
+            'sia': { name: 'Sia Tube', timeout: '6.0s' },
+            'sennin': { name: 'Sennin', timeout: '6.0s' },
+            'acethinker': { name: 'AceThinker', timeout: '10.0s' },
+            'min-tube2-api': { name: 'MIN-Tube2', timeout: '10.0s' },
+            'rapidapi': { name: 'RapidAPI', timeout: '10.0s' },
+            'freemake': { name: 'Freemake', timeout: '10.0s' },
+            'zernio': { name: 'Zernio (getlate)', timeout: '3.0s' }
         };
         const infoApi = infoApiUsed || 'invidious';
         const streamApi = streamApiUsed || 'sia';
@@ -1741,8 +1831,9 @@
         });
 
         const urlParams = new URLSearchParams(window.location.search);
-        const currentInfoApi = urlParams.get('info_api') || infoApiUsed || '';
-        const currentStreamApi = urlParams.get('stream_api') || streamApiUsed || '';
+        // プルダウンは「指定したAPI」だけを示す(自動で使われたAPIを指定中と誤表示しない)
+        const currentInfoApi = urlParams.get('info_api') || '';
+        const currentStreamApi = urlParams.get('stream_api') || '';
 
         checkSubscribeStatus(authorId);
 
@@ -1752,7 +1843,7 @@
         document.getElementById('cpMuteToggle').checked = video.muted;
 
         // Restore the saved mode. Stream mode starts playback; embeds replace it.
-        const preferredEmbedMode = lsGet('pref_embed_mode') || 'stream';
+        const preferredEmbedMode = lsGet(PREF_EMBED_KEY) || DEFAULT_EMBED_MODE;
         selectSourceMode(preferredEmbedMode, { silent: true, persist: false });
 
         updateApiDisplay();

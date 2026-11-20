@@ -66,8 +66,8 @@ RAPIDAPI_KEY_ENVS = (
 FREEMAKE_URL = "https://downloader.freemake.com/api/videoinfo/{vid}"
 GETLATE_URL = "https://getlate.dev/api/tools/youtube-live-downloader"
 
-# 指定(?api=...)で選べる名前。video.py の api 引数と合わせる
-API_NAMES = ("acethinker", "min-tube2-api", "rapidapi", "freemake")
+# 指定(?stream_api=...)で選べる名前。画面のプルダウンの value と一致させること
+API_NAMES = ("acethinker", "min-tube2-api", "rapidapi", "freemake", "zernio")
 
 DEFAULT_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -491,6 +491,7 @@ async def fetch_wakame_streams(video_id: str, api: Optional[str] = None) -> Opti
                 "min-tube2-api": lambda: _mintube_all(video_id),
                 "rapidapi": lambda: fetch_rapidapi(video_id),
                 "freemake": lambda: fetch_freemake(video_id),
+                "zernio": lambda: fetch_getlate(video_id),
             }.get(api)
             if single is None:
                 return None
@@ -507,6 +508,7 @@ async def fetch_wakame_streams(video_id: str, api: Optional[str] = None) -> Opti
             accept=is_playable,
             timeout=SOURCE_TIMEOUT,
         )
+        # 遅延(2秒)+ 取得(最大10秒)+ getlate(3秒) を待てるように、外側の打ち切りより短くする
         if result is None:
             fallback = await fetch_getlate(video_id)
             if is_playable(fallback):

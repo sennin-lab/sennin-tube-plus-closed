@@ -235,13 +235,16 @@
             100% { background-position: 0% 50%; }
         }
 
-        /* Page transition animation */
+        /* Page transition animation
+           forwards は付けない: 終了後も transform: translateY(0) が残ると、内側の position:fixed
+           (モーダル・トースト)が画面ではなくこの要素を基準に配置され、画面外に隠れてしまうため。
+           終了時の見た目は通常状態(opacity 1 / transform なし)と同じなので、ずれは出ない。 */
         @keyframes fadeIn {
           from { opacity: 0; transform: translateY(8px); }
           to { opacity: 1; transform: translateY(0); }
         }
         .animate-fade-in-main {
-          animation: fadeIn 0.35s ease-out forwards;
+          animation: fadeIn 0.35s ease-out;
         }
 
         /* Modal animation */
@@ -250,7 +253,7 @@
           to { opacity: 1; transform: scale(1); }
         }
         .animate-scale-in {
-          animation: scaleIn 0.2s ease-out forwards;
+          animation: scaleIn 0.2s ease-out;
         }
 
         /* Scrollbars */
@@ -729,6 +732,21 @@
     </div>
 
     <script>
+        // 履歴の削除と一緒に呼ぶ: サーバー側で httponly の検索履歴 Cookie を消し、おすすめもリセットする
+        window.resetServerHistory = async function () {
+            try {
+                const res = await fetch('/api/history/reset', {
+                    method: 'POST',
+                    credentials: 'same-origin',
+                    cache: 'no-store'
+                });
+                return res.ok;
+            } catch (e) {
+                console.warn('履歴のリセットに失敗しました', e);
+                return false;
+            }
+        };
+
         $(document).ready(function () {
             // サイドバー開閉切り替え
             $("#menu-toggle").click(function () {

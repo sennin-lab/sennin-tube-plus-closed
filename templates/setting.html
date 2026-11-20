@@ -146,11 +146,11 @@
     }
 
     .yt-btn-text:hover {
-        background-color: rgba(62, 166, 255, 0.15);
+        background-color: var(--accent-soft);
     }
 
     .yt-btn-danger {
-        color: #ff4e4e;
+        color: var(--danger);
     }
 
     .yt-btn-danger:hover {
@@ -207,7 +207,7 @@
         left: 0;
         width: 100vw;
         height: 100vh;
-        background-color: rgba(0, 0, 0, 0.6);
+        background-color: var(--scrim);
         display: flex;
         align-items: center;
         justify-content: center;
@@ -223,8 +223,8 @@
     }
 
     .yt-modal {
-        background-color: var(--yt-dialog-bg, #212121);
-        color: var(--yt-text-primary, #ffffff);
+        background-color: var(--surface-overlay);
+        color: var(--text);
         width: 100%;
         max-width: 440px;
         border-radius: 12px;
@@ -242,12 +242,12 @@
         font-size: 18px;
         font-weight: 600;
         margin: 0 0 12px 0;
-        color: var(--yt-text-primary, #ffffff);
+        color: var(--text);
     }
 
     .yt-modal-body {
         font-size: 14px;
-        color: var(--yt-text-secondary, #aaaaaa);
+        color: var(--text-secondary);
         line-height: 1.5;
         margin-bottom: 24px;
     }
@@ -270,23 +270,23 @@
     }
 
     .yt-modal-btn-cancel {
-        color: var(--yt-text-primary, #ffffff);
+        color: var(--text);
     }
 
     .yt-modal-btn-cancel:hover {
-        background-color: rgba(255, 255, 255, 0.1);
+        background-color: var(--hover);
     }
 
     .yt-modal-btn-confirm {
-        color: #3ea6ff;
+        color: var(--accent);
     }
 
     .yt-modal-btn-confirm:hover {
-        background-color: rgba(62, 166, 255, 0.15);
+        background-color: var(--accent-soft);
     }
 
     .yt-modal-btn-danger {
-        color: #ff4e4e;
+        color: var(--danger);
     }
 
     .yt-modal-btn-danger:hover {
@@ -296,10 +296,11 @@
     /* トースト通知 */
     .yt-toast {
         position: fixed;
-        bottom: 24px;
+        bottom: calc(24px + env(safe-area-inset-bottom, 0px));
         left: 24px;
-        background-color: var(--yt-toast-bg, #0f0f0f);
-        color: var(--yt-toast-text, #ffffff);
+        background-color: var(--text);
+        color: var(--surface);
+        max-width: calc(100vw - 48px);
         padding: 12px 20px;
         border-radius: 8px;
         font-size: 14px;
@@ -442,7 +443,14 @@
 
 {% block extra_js %}
 <script>
-    $(document).ready(function () {
+        // モーダル・トーストは <body> 直下へ移動する(ページ内の transform に巻き込まれて画面外に隠れないように)
+    (function () {
+        ['yt-modal', 'yt-toast'].forEach(function (id) {
+            var el = document.getElementById(id);
+            if (el) document.body.appendChild(el);
+        });
+    })();
+$(document).ready(function () {
         // --- タブ切り替え ---
         $('.settings-menu-item').click(function () {
             $('.settings-menu-item').removeClass('active');
@@ -565,7 +573,10 @@
                 true,
                 function () {
                     localStorage.removeItem('yt_search_history');
-                    showToast('検索履歴を削除しました');
+                    // 検索履歴 Cookie も消す(おすすめは検索履歴を元にするため、ここでリセットされる)
+                    window.resetServerHistory().then(function (ok) {
+                        showToast(ok ? '検索履歴とおすすめをリセットしました' : '検索履歴を削除しました（おすすめのリセットに失敗しました）');
+                    });
                 }
             );
         });
@@ -578,7 +589,9 @@
                 true,
                 function () {
                     localStorage.removeItem('yt_watch_history');
-                    showToast('再生履歴を消去しました');
+                    window.resetServerHistory().then(function (ok) {
+                        showToast(ok ? '再生履歴とおすすめをリセットしました' : '再生履歴を消去しました（おすすめのリセットに失敗しました）');
+                    });
                 }
             );
         });

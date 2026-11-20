@@ -217,6 +217,17 @@ async def clear_history():
     return response
 
 
+@app.post("/api/history/reset")
+async def reset_history_cookies():
+    """履歴の削除と一緒に呼ぶ。検索履歴(search_history)は httponly の Cookie なので、JS からは消せない。
+    これを消すと、おすすめ(/api/recommended は検索履歴を元にする)もリセットされる。"""
+    response = JSONResponse({"ok": True})
+    for name in ("search_history", "history"):
+        response.delete_cookie(name, path="/")
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
 @app.get("/suggest")
 async def suggest(keyword: str):
     from app.search import fetch_with_inflight

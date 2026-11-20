@@ -1653,6 +1653,10 @@ async def _fetch_piped_streams(video_id: str) -> Optional[Dict[str, Any]]:
     return result
 
 
+# ストリームを「指定のAPIだけ」で取りに行く名前の一覧(画面のプルダウンの value と一致させる)
+_STREAM_SPECIFIC_APIS = frozenset({"sia", "sennin", *wakame_sources.API_NAMES})
+
+
 async def fetch_fastest_stream_urls(
     video_id: str,
     api: Optional[str] = None,
@@ -1668,10 +1672,17 @@ async def fetch_fastest_stream_urls(
         result = await _fetch_invidious_streams(video_id, force_instance)
     elif api == "piped":
         result = await _fetch_piped_streams(video_id)
-    elif api in ("sia", "sennin") or api in wakame_sources.API_NAMES:
+    elif api in _STREAM_SPECIFIC_APIS:
         result = await _fetch_api_streams(video_id, api)
     else:
         result = await _fetch_streams_fastest(video_id, force_instance)
+
+    # 指定したAPIで取れなかったら、自動選択(並列で最速)に切り替える。
+    # 切り替えたことは stream_api_fallback で画面に知らせる。
+    if not result and api:
+        result = await _fetch_streams_fastest(video_id, force_instance)
+        if result:
+            result["stream_api_fallback"] = api
 
     if result:
         await _cache_set(cache_key, result, CACHE_CONFIG["streams"])
@@ -1834,8 +1845,9 @@ async def _fetch_streams_fastest(
         # わかめtube由来の取得先(AceThinker / MIN-Tube2 / RapidAPI / Freemake / 最後にgetlate)
         (lambda: wakame_sources.fetch_wakame_streams_delayed(video_id)),
     ]
-    # 再生候補(streamUrls)を持つ最初の結果を採用する
-    return await race_first(factories, accept=_has_playable_streams, timeout=12.0)
+    # 再生候補(streamUrls)を持つ最初の結果を採用する。
+    # わかめ系は 遅延2秒 + 最大10秒 + getlate 3秒 かかるため、余裕を持たせる
+    return await race_first(factories, accept=_has_playable_streams, timeout=18.0)
 
 
 def _normalize_comment(comment: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -2468,6 +2480,7 @@ async def api_streams(
             "streamUrls": candidates,
             "videoUrls": [c.get("url") for c in candidates if c.get("url")],
             "stream_api_used": data.get("stream_api_used", "unknown"),
+            "stream_api_fallback": data.get("stream_api_fallback"),
         },
         headers={"Cache-Control": "no-store"},
     )
@@ -2641,6 +2654,12 @@ async def watch(
 
         info_api_used = v_data.get("api_used") or v_data.get("_source") or "unknown"
         stream_api_used = s_data.get("stream_api_used") or "unknown"
+        stream_api_note = ""
+        if s_data.get("stream_api_fallback"):
+            stream_api_note = (
+                f"指定の「{s_data['stream_api_fallback']}」で取得できなかったため、"
+                "自動選択に切り替えました"
+            )
 
         return templates.TemplateResponse(
             "watch.html",
@@ -2668,6 +2687,8 @@ async def watch(
                 "playlist_id": playlist_id,
                 "info_api_used": info_api_used,
                 "stream_api_used": stream_api_used,
+                "stream_api_note": stream_api_note,
+                "stream_api_requested": resolved_stream_api or "",
                 "api_used": info_api_used,
             },
         )
